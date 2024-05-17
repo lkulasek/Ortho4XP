@@ -17,6 +17,7 @@ import random
 from math import ceil, log, tan, pi
 import numpy
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps
+import O4_User_Agent as UA
 
 Image.MAX_IMAGE_PIXELS = 1000000000  # Not a decompression bomb attack!
 
@@ -38,7 +39,7 @@ except:
             "The corresponding providers won't probably work.",
         )
 
-http_timeout = 10
+http_timeout = 3
 check_tms_response = False
 max_connect_retries = 10
 max_baddata_retries = 10
@@ -1009,6 +1010,7 @@ def http_request_to_image(width, height, url, request_headers, http_session):
     r = False
     while True:
         try:
+            request_headers['User-Agent'] = UA.generate_user_agent()
             if request_headers:
                 r = http_session.get(
                     url, timeout=http_timeout, headers=request_headers
