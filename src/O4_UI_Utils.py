@@ -17,9 +17,13 @@ def progress_bar(nbr, percentage, message=None):
 
 
 ################################################################################
+def get_logging_timestamp():
+    return time.strftime("%Y-%m-%d %H:%M:%S") + "   "
+
+################################################################################
 def vprint(min_verbosity, *args):
     if verbosity >= min_verbosity:
-        print(*args)
+        print(get_logging_timestamp(), *args)
 
 
 ################################################################################
@@ -40,7 +44,7 @@ def logprint(*args):
 ################################################################################
 def lvprint(min_verbosity, *args):
     if verbosity >= min_verbosity:
-        print(*args)
+        print(get_logging_timestamp(), *args)
     if log:
         logprint(*args)
 
@@ -61,7 +65,7 @@ def exit_message_and_bottom_line(*args):
         args = ("Process interrupted",)
     if args[0]:
         logprint(*args)
-        print(*args)
+        print(get_logging_timestamp(), *args)
     print(
         "_____________________________________________________________"
         + "____________________________________"

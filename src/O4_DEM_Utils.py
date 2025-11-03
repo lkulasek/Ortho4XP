@@ -740,7 +740,7 @@ def ensure_elevation(source, lat, lon, verbose=True):
             1,
             "    WARNING : This elevation source has no longer direct downloads !"
         )
-        return 0
+        return 1
         # TODO : is there a way to get it back (worth it ?) 
         url = "https://cloud.sdsc.edu/v1/AUTH_opentopography/Raster/"
         if source == "SRTM":

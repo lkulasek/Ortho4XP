@@ -6,4 +6,4 @@ tile_size=256
 fake_headers={'Referer':'www.norgeibilder.no'}
 max_threads=16
 imagery_dir=grouped
-in_GUI=False
+in_GUI=True

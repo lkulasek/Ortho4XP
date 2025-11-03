@@ -223,18 +223,23 @@ def build_tile_list(
         return 0
     UI.red_flag = 0
     timer = time.time()
+    number_of_tiles = len(list_lat_lon)
     UI.lvprint(
-        0, "Batch build launched for a number of", len(list_lat_lon), "tiles."
+        0, "Batch build launched for a number of", number_of_tiles, "tiles."
     )
     k = 0
     for (lat, lon) in list_lat_lon:
         k += 1
+        time_elapsed = time.time() - timer
+        time_remaining = (time_elapsed / k) * (number_of_tiles - k)
         UI.vprint(
             1,
             "Dealing with tile ",
             k,
             "/",
-            len(list_lat_lon),
+            number_of_tiles,
+            " time elapsed:", UI.nicer_timer(time_elapsed),
+            " time remaining:", UI.nicer_timer(time_remaining),
             ":",
             FNAMES.short_latlon(lat, lon),
         )
