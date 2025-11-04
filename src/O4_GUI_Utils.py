@@ -339,8 +339,11 @@ class Ortho4XP_GUI(tk.Tk):
         self.pgrb3.grid(row=0, column=2, padx=5, pady=0)
 
         # Console
-        self.console = tk.Text(self.frame_console, bd=0)
+        self.console_scrollbar = ttk.Scrollbar(self.frame_console, orient="vertical")
+        self.console = tk.Text(self.frame_console, bd=0, yscrollcommand=self.console_scrollbar.set)
         self.console.grid(row=0, column=0, sticky=N + S + E + W)
+        self.console_scrollbar.config(command=self.console.yview)
+        self.console_scrollbar.grid(row=0, column=1, sticky=N + S)
         self.frame_console.rowconfigure(0, weight=1)
         self.frame_console.columnconfigure(0, weight=1)
 

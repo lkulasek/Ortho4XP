@@ -382,13 +382,21 @@ def build_combined_raster(source, lat, lon, info_only):
         if not world_tiles[y, x]:
             tmparray = numpy.zeros((base, base), dtype=numpy.float32)
         elif ensure_elevation(source, lat0, (lon0 + 180) % 360 - 180, verbose):
+            filename = FNAMES.elevation_data(source, lat0, (lon0 + 180) % 360 - 180)
+            UI.vprint(1, "Reading elevation from file:", filename)
             tmparray = read_elevation_from_file(
-                FNAMES.elevation_data(source, lat0, (lon0 + 180) % 360 - 180),
+                filename,
                 lat0,
                 (lon0 + 180) % 360 - 180,
                 info_only,
                 base,
             )[-1]
+
+            if tmparray.shape[0] != base or tmparray.shape[1] != base:
+                UI.vprint(1, f"WARNING: Resizing from {tmparray.shape} to ({base}, {base})")
+                img = Image.fromarray(tmparray)
+                img = img.resize((base, base), Image.BILINEAR)
+                tmparray = numpy.array(img, dtype=numpy.float32)
         else:
             tmparray = numpy.zeros((base, base), dtype=numpy.float32)
         by = beyond
