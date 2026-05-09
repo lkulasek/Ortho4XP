@@ -10,12 +10,12 @@ import O4_UI_Utils as UI
 import O4_File_Names as FNAMES
 
 overpass_servers = {
-    "DE": "http://overpass-api.de/api/interpreter",
-    "FR": "http://api.openstreetmap.fr/oapi/interpreter",
+    "DE": "https://overpass-api.de/api/interpreter",
+    "FR": "https://overpass.openstreetmap.fr/api/interpreter",
     "KU": "https://overpass.kumi.systems/api/interpreter",
-    "RU": "http://overpass.osm.rambler.ru/cgi/interpreter",
+    "CH": "https://overpass.osm.ch/api/interpreter",
 }
-overpass_server_choice = "DE"
+overpass_server_choice = "random"
 max_osm_tentatives = 8
 
 ################################################################################
@@ -512,26 +512,31 @@ def OSM_query_to_OSM_layer(
 ################################################################################
 def get_overpass_data(query, bbox, server_code=None):
     tentative = 1
+    headers = {"User-Agent": "Ortho4XP/1.0"}
+    available_servers = list(overpass_servers.keys())
     while True:
-        s = requests.Session()
         true_server_code = server_code
         if not server_code:
-            true_server_code = (
-                random.choice(list(overpass_servers.keys()))
-                if overpass_server_choice == "random"
-                else overpass_server_choice
-            )
+            if overpass_server_choice == "random":
+                true_server_code = random.choice(available_servers)
+            else:
+                true_server_code = overpass_server_choice
         base_url = overpass_servers[true_server_code]
         if isinstance(query, str):
             overpass_query = query + str(bbox) + ";"
         else:  # query is a tuple
             overpass_query = "".join([x + str(bbox) + ";" for x in query])
-        url = base_url + "?data=(" + overpass_query + ");(._;>>;);out meta;"
-        UI.vprint(3, url)
+        data_payload = "(" + overpass_query + ");(._;>>;);out meta;"
+        UI.vprint(3, base_url, data_payload)
         try:
-            r = s.get(url, timeout=60)
-            UI.vprint(3, "OSM response status :", r)
-            if "200" in str(r):
+            r = requests.post(
+                base_url,
+                data={"data": data_payload},
+                headers=headers,
+                timeout=60,
+            )
+            UI.vprint(3, "OSM response status :", r.status_code)
+            if r.status_code == 200:
                 if (
                     b"</osm>" not in r.content[-10:]
                     and b"</OSM>" not in r.content[-10:]
@@ -557,21 +562,49 @@ def get_overpass_data(query, bbox, server_code=None):
                     )
                 else:
                     break
+            elif r.status_code == 429:
+                retry_after = int(r.headers.get("Retry-After", 2 ** tentative))
+                UI.vprint(
+                    1,
+                    "        OSM server",
+                    true_server_code,
+                    "rate-limited us (429), retrying in",
+                    retry_after,
+                    "sec...",
+                )
+                # On rate-limit, try a different server next time
+                if not server_code and len(available_servers) > 1:
+                    other_servers = [
+                        s for s in available_servers if s != true_server_code
+                    ]
+                    if other_servers:
+                        UI.vprint(
+                            1, "        Switching to another server..."
+                        )
+                time.sleep(retry_after)
+                tentative += 1
+                if tentative >= max_osm_tentatives:
+                    return 0
+                if UI.red_flag:
+                    return 0
+                continue
             else:
                 UI.vprint(
                     1,
                     "        OSM server",
                     true_server_code,
-                    "rejected our query, new tentative in",
+                    "rejected our query (HTTP",
+                    str(r.status_code) + "),",
+                    "new tentative in",
                     2 ** tentative,
                     "sec...",
                 )
-        except:
+        except Exception:
             UI.vprint(
                 1,
                 "        OSM server",
                 true_server_code,
-                "was too busy, new tentative in",
+                "was too busy or unreachable, new tentative in",
                 2 ** tentative,
                 "sec...",
             )
