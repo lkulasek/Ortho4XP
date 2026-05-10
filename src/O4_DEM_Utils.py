@@ -29,9 +29,11 @@ available_sources = (
     'NED 1/3" (from USGS) - USA',
     "ALOS",
     "ALOS 3W30 (from OpenTopography) - NOW REQUIRES MANUAL DOWNLOAD",
+    "PL_NMT",
+    "Polish NMT (from GUGiK) - Poland, manual download",
 )
 
-global_sources = ("View", "SRTM", "ALOS")
+global_sources = ("View", "SRTM", "ALOS", "PL_NMT")
 
 ################################################################################
 class DEM:
@@ -370,6 +372,16 @@ def build_combined_raster(source, lat, lon, info_only):
         epsg = 4326
         nodata = -32768
         nxdem = nydem = base + 2 * beyond  # = 3672
+    elif source == "PL_NMT":
+        base = 10800
+        overlap = 0
+        beyond = 108
+        eps = 1 / 21600
+        x0 = y0 = -0.01 + eps
+        x1 = y1 = 1.01 - eps
+        epsg = 4326
+        nodata = -32768
+        nxdem = nydem = base + 2 * beyond  # = 11016
     if info_only:
         return (epsg, x0, y0, x1, y1, nodata, nxdem, nydem, None)
     alt_dem = numpy.zeros((nydem, nxdem), dtype=numpy.float32)
@@ -827,6 +839,22 @@ def ensure_elevation(source, lat, lon, verbose=True):
                 out.write(r.content)
             except:
                 return 0
+    elif source == "PL_NMT":
+        output_file = FNAMES.elevation_data(source, lat, lon)
+        if os.path.exists(output_file):
+            UI.vprint(2, "   Recycling", output_file)
+            return 1
+        if verbose:
+            UI.vprint(
+                1,
+                "    PL_NMT file not found:",
+                output_file,
+            )
+            UI.vprint(
+                1,
+                "    Run: python3 Utils/download_pl_nmt.py {} {}".format(lat, lon),
+            )
+        return 0
     else:
         UI.vprint(1, "   ERROR: Unknown elevation source.")
         return 0

@@ -307,6 +307,10 @@ def elevation_data(source, lat, lon):
         return base_file_name(lat, lon) + "_NED13.tif"
     elif source == "NED1":
         return base_file_name(lat, lon) + "_NED1.tif"
+    elif source == "PL_NMT":
+        return base_file_name(lat, lon) + "_PL_NMT.tif"
+    else:
+        raise ValueError("Unknown elevation source: {}".format(source))
 ##############################################################################
 
 ##############################################################################
