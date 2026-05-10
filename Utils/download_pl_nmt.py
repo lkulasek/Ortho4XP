@@ -30,9 +30,20 @@ import time
 import tempfile
 import shutil
 import threading
+import ssl
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# GUGiK servers have SSL certificate issues on some platforms (especially Windows).
+# Create a non-verifying context as fallback.
+try:
+    _ssl_context = ssl.create_default_context()
+    urllib.request.urlopen("https://mapy.geoportal.gov.pl", timeout=5, context=_ssl_context)
+except ssl.SSLError:
+    _ssl_context = ssl._create_unverified_context()
+except Exception:
+    _ssl_context = ssl._create_unverified_context()
 
 try:
     import requests as req_lib
@@ -103,7 +114,7 @@ def query_wfs_sheets(lat, lon, year, min_resolution=None):
         ).format(WFS_BASE, layer, bbox, page_size, start)
 
         try:
-            resp = urllib.request.urlopen(url, timeout=60)
+            resp = urllib.request.urlopen(url, timeout=60, context=_ssl_context)
             data = resp.read().decode(errors="replace")
         except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
             print("  WFS query failed for year {}: {}".format(year, e))
@@ -166,7 +177,7 @@ def download_file(url, dest_path, retries=3):
             return False
     for attempt in range(retries):
         try:
-            resp = urllib.request.urlopen(url, timeout=60)
+            resp = urllib.request.urlopen(url, timeout=60, context=_ssl_context)
             with open(dest_path, "wb") as f:
                 f.write(resp.read())
             return True
