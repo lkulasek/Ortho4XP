@@ -22,8 +22,6 @@ POLAND_TILES = [
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_SCRIPT = os.path.join(SCRIPT_DIR, "download_pl_nmt.py")
-CONDA_ENV = "gdal_env"
-
 MAX_PARALLEL_TILES = 2
 
 
@@ -31,7 +29,7 @@ def download_tile(lat_lon):
     lat, lon = lat_lon
     print(f"[START] Tile lat={lat} lon={lon}", flush=True)
     result = subprocess.run(
-        ["conda", "run", "-n", CONDA_ENV, "python3", DOWNLOAD_SCRIPT, str(lat), str(lon)],
+        [sys.executable, DOWNLOAD_SCRIPT, str(lat), str(lon)],
         capture_output=True,
         text=True,
     )
