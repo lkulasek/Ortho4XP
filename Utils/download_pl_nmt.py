@@ -36,14 +36,8 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # GUGiK servers have SSL certificate issues on some platforms (especially Windows).
-# Create a non-verifying context as fallback.
-try:
-    _ssl_context = ssl.create_default_context()
-    urllib.request.urlopen("https://mapy.geoportal.gov.pl", timeout=5, context=_ssl_context)
-except ssl.SSLError:
-    _ssl_context = ssl._create_unverified_context()
-except Exception:
-    _ssl_context = ssl._create_unverified_context()
+# Use a non-verifying context for all urllib requests to GUGiK.
+_ssl_context = ssl._create_unverified_context()
 
 try:
     import requests as req_lib
