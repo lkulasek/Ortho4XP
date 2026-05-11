@@ -40,7 +40,7 @@ except:
         )
 
 http_timeout = 3
-check_tms_response = False
+check_tms_response = True
 max_connect_retries = 10
 max_baddata_retries = 10
 
@@ -1580,8 +1580,9 @@ def download_jpeg_ortho(
             "Part of image",
             file_name,
             "could not be obtained ",
-            "(even at lower ZL), it was filled with white there.",
+            "(even at lower ZL), skipping save to avoid caching a broken texture.",
         )
+        return 0
     if not os.path.exists(file_dir):
         os.makedirs(file_dir)
     try:
