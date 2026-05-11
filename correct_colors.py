@@ -84,8 +84,13 @@ MIN_STD = 5.0
 MAX_SCALE = 2.0
 MIN_SCALE = 0.5
 
-# Border sampling: how many pixel rows/cols to sample along shared edges
-BORDER_SAMPLE_WIDTH = 48
+# Border sampling: how many pixel rows/cols to sample along shared edges.
+# Narrower = better represents the actual seam discontinuity.
+BORDER_SAMPLE_WIDTH = 16
+
+# Number of segments to split each border into for sampling.
+# More segments = better-constrained affine model (3 unknowns per tile).
+BORDER_SAMPLE_SEGMENTS = 6
 
 # Regularization weight for the least-squares solver.
 # Higher = corrections are smaller (more conservative).
@@ -554,18 +559,18 @@ def build_adjacency_graph(file_paths):
 
 
 def sample_border_stats(image_path, edge_type, side, land_mask=None):
-    """Sample LAB statistics from the border of a tile, split into two halves.
+    """Sample LAB statistics from the border of a tile, split into segments.
 
     For a horizontal edge (left/right neighbor), the border strip runs
-    vertically, so we split it into top half and bottom half.
+    vertically, so we split it into BORDER_SAMPLE_SEGMENTS segments along rows.
     For a vertical edge (top/bottom neighbor), the border strip runs
-    horizontally, so we split it into left half and right half.
+    horizontally, so we split it into BORDER_SAMPLE_SEGMENTS segments along cols.
 
     If land_mask is provided (4096x4096 uint8), only land pixels
     (mask >= LAND_THRESHOLD) are included in the statistics.
 
-    Returns list of 2 (3,) float32 arrays (half means), or None.
-    Halves ordered: h0 (top/left), h1 (bottom/right).
+    Returns list of BORDER_SAMPLE_SEGMENTS (3,) float32 arrays (segment means),
+    or None. Segments ordered from top-to-bottom or left-to-right.
     """
     try:
         img = Image.open(image_path)
@@ -596,25 +601,26 @@ def sample_border_stats(image_path, edge_type, side, land_mask=None):
     if land_mask is not None:
         mask_strip = land_mask[box[1]:box[3], box[0]:box[2]]
 
-    # Split into 2 halves along the long axis
+    # Split into BORDER_SAMPLE_SEGMENTS segments along the long axis
+    n_seg = BORDER_SAMPLE_SEGMENTS
     if edge_type == 'horizontal':
-        # Strip is (h, bw, 3) — split along rows into 2 halves
-        half = lab_strip.shape[0] // 2
-        halves_lab = [lab_strip[:half], lab_strip[half:]]
+        # Strip is (h, bw, 3) — split along rows
+        seg_len = lab_strip.shape[0] // n_seg
+        halves_lab = [lab_strip[i*seg_len:(i+1)*seg_len] for i in range(n_seg)]
         if mask_strip is not None:
-            halves_mask = [mask_strip[:half] >= LAND_THRESHOLD,
-                           mask_strip[half:] >= LAND_THRESHOLD]
+            halves_mask = [mask_strip[i*seg_len:(i+1)*seg_len] >= LAND_THRESHOLD
+                           for i in range(n_seg)]
         else:
-            halves_mask = [None, None]
+            halves_mask = [None] * n_seg
     else:
-        # Strip is (bw, w, 3) — split along cols into 2 halves
-        half = lab_strip.shape[1] // 2
-        halves_lab = [lab_strip[:, :half], lab_strip[:, half:]]
+        # Strip is (bw, w, 3) — split along cols
+        seg_len = lab_strip.shape[1] // n_seg
+        halves_lab = [lab_strip[:, i*seg_len:(i+1)*seg_len] for i in range(n_seg)]
         if mask_strip is not None:
-            halves_mask = [mask_strip[:, :half] >= LAND_THRESHOLD,
-                           mask_strip[:, half:] >= LAND_THRESHOLD]
+            halves_mask = [mask_strip[:, i*seg_len:(i+1)*seg_len] >= LAND_THRESHOLD
+                           for i in range(n_seg)]
         else:
-            halves_mask = [None, None]
+            halves_mask = [None] * n_seg
 
     def masked_mean(lab_block, mask_block):
         if mask_block is not None:
@@ -683,8 +689,10 @@ def solve_graph_corrections(n_tiles, border_equations):
                 corrections[i, ch, 0] = params[base + 0]  # a
                 corrections[i, ch, 1] = params[base + 1]  # b
                 corrections[i, ch, 2] = params[base + 2]  # c
-        except np.linalg.LinAlgError:
-            pass
+        except np.linalg.LinAlgError as e:
+            print(f"  Warning: least-squares solve failed for channel "
+                  f"{['L', 'a', 'b'][ch]}: {e}. Corrections for this "
+                  f"channel will be zero.")
 
     return corrections
 
@@ -715,7 +723,8 @@ def pass2_apply_correction(image_path, output_path, correction, strength, qualit
         return False
 
     # Check if correction is negligible and no post-processing needed
-    no_postprocess = (SATURATION_BOOST == 1.0 and CONTRAST_BOOST == 1.0)
+    no_postprocess = (SATURATION_BOOST == 1.0 and CONTRAST_BOOST == 1.0
+                      and BLUE_CAST_REMOVAL == 0.0)
     if np.max(np.abs(correction)) < 0.1 and (no_postprocess or not is_jpeg):
         if is_jpeg:
             Image.fromarray(arr).save(output_path, "JPEG", quality=quality)
@@ -738,14 +747,8 @@ def pass2_apply_correction(image_path, output_path, correction, strength, qualit
 
     # Post-processing: only on final JPEG output
     if is_jpeg:
-        if CONTRAST_BOOST != 1.0:
-            mean_L = lab[:, :, 0].mean()
-            lab[:, :, 0] = (lab[:, :, 0] - mean_L) * CONTRAST_BOOST + mean_L
-        if SATURATION_BOOST != 1.0:
-            lab[:, :, 1] *= SATURATION_BOOST
-            lab[:, :, 2] *= SATURATION_BOOST
-
-        # Blue cast removal: nudge blue-biased neutral pixels toward neutral
+        # Blue cast removal first — before saturation boost so chroma
+        # thresholds reflect the natural (unboosted) color values.
         if BLUE_CAST_REMOVAL > 0.0:
             L_ch = lab[:, :, 0]
             a_ch = lab[:, :, 1]
@@ -764,8 +767,17 @@ def pass2_apply_correction(image_path, output_path, correction, strength, qualit
             # Nudge b channel toward 0 (neutral)
             lab[:, :, 2] = b_ch * (1.0 - blend)
 
-    # Clamp L
+        if CONTRAST_BOOST != 1.0:
+            mean_L = lab[:, :, 0].mean()
+            lab[:, :, 0] = (lab[:, :, 0] - mean_L) * CONTRAST_BOOST + mean_L
+        if SATURATION_BOOST != 1.0:
+            lab[:, :, 1] *= SATURATION_BOOST
+            lab[:, :, 2] *= SATURATION_BOOST
+
+    # Clamp LAB channels to valid ranges
     lab[:, :, 0] = np.clip(lab[:, :, 0], 0, 100)
+    lab[:, :, 1] = np.clip(lab[:, :, 1], -128, 127)
+    lab[:, :, 2] = np.clip(lab[:, :, 2], -128, 127)
 
     result = lab_to_rgb(lab)
     out_img = Image.fromarray(result)
@@ -977,8 +989,9 @@ def main():
         mask_cache[tile_path] = mask
         return mask
 
-    # Quadrant centers (2 sample points along the border — halves)
-    H_POS = [0.25, 0.75]
+    # Segment center positions (normalized 0..1 along the border)
+    n_seg = BORDER_SAMPLE_SEGMENTS
+    H_POS = [(i + 0.5) / n_seg for i in range(n_seg)]
 
     # Cross-ZL anchoring data (computed once from pass 1 stats)
     input_to_intermediate = {str(inp): inter for inp, inter, _ in all_files}
@@ -1025,7 +1038,7 @@ def main():
 
             if stats_i is not None and stats_j is not None:
                 if edge_type == 'horizontal':
-                    for k in range(2):
+                    for k in range(n_seg):
                         v = H_POS[k]
                         gap = stats_j[k] - stats_i[k]
                         coeffs = [
@@ -1034,7 +1047,7 @@ def main():
                         ]
                         border_equations.append((coeffs, gap))
                 else:
-                    for k in range(2):
+                    for k in range(n_seg):
                         u = H_POS[k]
                         gap = stats_j[k] - stats_i[k]
                         coeffs = [
