@@ -514,11 +514,15 @@ def get_overpass_data(query, bbox, server_code=None):
     tentative = 1
     headers = {"User-Agent": "Ortho4XP/1.0"}
     available_servers = list(overpass_servers.keys())
+    random.shuffle(available_servers)
+    server_index = 0
     while True:
         true_server_code = server_code
         if not server_code:
             if overpass_server_choice == "random":
-                true_server_code = random.choice(available_servers)
+                true_server_code = available_servers[
+                    server_index % len(available_servers)
+                ]
             else:
                 true_server_code = overpass_server_choice
         base_url = overpass_servers[true_server_code]
@@ -550,6 +554,7 @@ def get_overpass_data(query, bbox, server_code=None):
                         2 ** tentative,
                         "sec...",
                     )
+                    server_index += 1
                 elif len(r.content) <= 1000 and b"error" in r.content:
                     UI.vprint(
                         1,
@@ -560,6 +565,7 @@ def get_overpass_data(query, bbox, server_code=None):
                         2 ** tentative,
                         "sec...",
                     )
+                    server_index += 1
                 else:
                     break
             elif r.status_code == 429:
@@ -572,15 +578,21 @@ def get_overpass_data(query, bbox, server_code=None):
                     retry_after,
                     "sec...",
                 )
-                # On rate-limit, try a different server next time
+                # On rate-limit, remove this server and try a different one
                 if not server_code and len(available_servers) > 1:
-                    other_servers = [
+                    available_servers = [
                         s for s in available_servers if s != true_server_code
                     ]
-                    if other_servers:
-                        UI.vprint(
-                            1, "        Switching to another server..."
-                        )
+                    server_index = 0
+                    UI.vprint(
+                        1,
+                        "        Removed server",
+                        true_server_code,
+                        "from rotation, remaining:",
+                        available_servers,
+                    )
+                else:
+                    server_index += 1
                 time.sleep(retry_after)
                 tentative += 1
                 if tentative >= max_osm_tentatives:
@@ -599,6 +611,7 @@ def get_overpass_data(query, bbox, server_code=None):
                     2 ** tentative,
                     "sec...",
                 )
+                server_index += 1
         except Exception:
             UI.vprint(
                 1,
@@ -608,6 +621,7 @@ def get_overpass_data(query, bbox, server_code=None):
                 2 ** tentative,
                 "sec...",
             )
+            server_index += 1
         if tentative >= max_osm_tentatives:
             return 0
         if UI.red_flag:
