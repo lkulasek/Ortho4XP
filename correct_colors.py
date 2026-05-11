@@ -99,7 +99,7 @@ REGULARIZATION = 0.03
 
 # Number of pass 2 iterations. Each iteration re-samples borders from
 # the previous result and re-solves. More iterations = better convergence.
-PASS2_ITERATIONS = 1
+PASS2_ITERATIONS = 2
 
 # Post-processing: overall saturation and contrast boost.
 # 1.0 = no change, >1.0 = increase, <1.0 = decrease.
@@ -623,52 +623,71 @@ def sample_border_stats(image_path, edge_type, side, land_mask=None):
             halves_mask = [None] * n_seg
 
     def masked_mean(lab_block, mask_block):
+        """Return (mean, confidence) or (None, 0)."""
         if mask_block is not None:
-            if mask_block.sum() < 10:
-                return None
-            return lab_block[mask_block].mean(axis=0).astype(np.float32)
+            n_land = mask_block.sum()
+            if n_land < 10:
+                return None, 0.0
+            pixels = lab_block[mask_block]
+            mean = pixels.mean(axis=0).astype(np.float32)
+            # Confidence: fraction of land pixels × inverse variance factor.
+            # Low variance = more uniform segment = higher confidence.
+            total_pixels = mask_block.size
+            land_frac = n_land / max(total_pixels, 1)
+            variance = pixels.var(axis=0).mean()
+            inv_var_factor = 1.0 / (1.0 + variance)
+            confidence = land_frac * inv_var_factor
+            return mean, float(confidence)
         else:
-            return lab_block.mean(axis=(0, 1)).astype(np.float32)
+            pixels = lab_block.reshape(-1, 3)
+            mean = pixels.mean(axis=0).astype(np.float32)
+            variance = pixels.var(axis=0).mean()
+            inv_var_factor = 1.0 / (1.0 + variance)
+            return mean, float(inv_var_factor)
 
     results = [masked_mean(q, m) for q, m in zip(halves_lab, halves_mask)]
-    if any(r is None for r in results):
+    means = [r[0] for r in results]
+    weights = [r[1] for r in results]
+    if any(m is None for m in means):
         return None
 
-    return results
+    return means, weights
 
 
 def solve_graph_corrections(n_tiles, border_equations):
-    """Solve least-squares system for per-tile affine LAB corrections.
+    """Solve least-squares system for per-tile bilinear LAB corrections.
 
-    Each tile i has 3 parameters per LAB channel:
-        correction_i(u, v) = a_i + b_i * u + c_i * v
+    Each tile i has 4 parameters per LAB channel:
+        correction_i(u, v) = a_i + b_i * u + c_i * v + d_i * u * v
     where u ∈ [0,1] is horizontal, v ∈ [0,1] is vertical position.
 
-    border_equations: list of (coeffs_lhs, rhs) tuples.
-        coeffs_lhs: list of (tile_idx, a_coeff, b_coeff, c_coeff)
+    border_equations: list of (coeffs_lhs, rhs, weight) tuples.
+        coeffs_lhs: list of (tile_idx, a_coeff, b_coeff, c_coeff, d_coeff)
         rhs: (3,) float32 array — the measured LAB gap
+        weight: float — confidence weight for this equation
 
-    Returns corrections as (n_tiles, 3, 3) float32 array where
-    corrections[i, ch] = [a, b, c].
+    Returns corrections as (n_tiles, 3, 4) float32 array where
+    corrections[i, ch] = [a, b, c, d].
     """
-    n_params = n_tiles * 3  # 3 params per tile: a, b, c
+    n_params = n_tiles * 4  # 4 params per tile: a, b, c, d
 
     if not border_equations:
-        return np.zeros((n_tiles, 3, 3), dtype=np.float32)
+        return np.zeros((n_tiles, 3, 4), dtype=np.float32)
 
-    corrections = np.zeros((n_tiles, 3, 3), dtype=np.float32)
+    corrections = np.zeros((n_tiles, 3, 4), dtype=np.float32)
 
     for ch in range(3):
         AtA = np.zeros((n_params, n_params), dtype=np.float64)
         Atb = np.zeros(n_params, dtype=np.float64)
 
-        for coeffs_lhs, rhs in border_equations:
+        for coeffs_lhs, rhs, weight in border_equations:
             d = float(rhs[ch])
+            w = float(weight)
             indices = []
             values = []
-            for tile_idx, a_coeff, b_coeff, c_coeff in coeffs_lhs:
-                base = tile_idx * 3
-                for offset, val in enumerate([a_coeff, b_coeff, c_coeff]):
+            for tile_idx, a_coeff, b_coeff, c_coeff, d_coeff in coeffs_lhs:
+                base = tile_idx * 4
+                for offset, val in enumerate([a_coeff, b_coeff, c_coeff, d_coeff]):
                     if val != 0.0:
                         indices.append(base + offset)
                         values.append(val)
@@ -676,19 +695,20 @@ def solve_graph_corrections(n_tiles, border_equations):
             for p in range(len(indices)):
                 ip = indices[p]
                 vp = values[p]
-                Atb[ip] += vp * d
+                Atb[ip] += w * vp * d
                 for q in range(len(indices)):
-                    AtA[ip, indices[q]] += vp * values[q]
+                    AtA[ip, indices[q]] += w * vp * values[q]
 
         np.fill_diagonal(AtA, AtA.diagonal() + REGULARIZATION)
 
         try:
             params = np.linalg.solve(AtA, Atb)
             for i in range(n_tiles):
-                base = i * 3
+                base = i * 4
                 corrections[i, ch, 0] = params[base + 0]  # a
                 corrections[i, ch, 1] = params[base + 1]  # b
                 corrections[i, ch, 2] = params[base + 2]  # c
+                corrections[i, ch, 3] = params[base + 3]  # d
         except np.linalg.LinAlgError as e:
             print(f"  Warning: least-squares solve failed for channel "
                   f"{['L', 'a', 'b'][ch]}: {e}. Corrections for this "
@@ -698,10 +718,10 @@ def solve_graph_corrections(n_tiles, border_equations):
 
 
 def pass2_apply_correction(image_path, output_path, correction, strength, quality):
-    """Apply an affine LAB correction field to an image.
+    """Apply a bilinear LAB correction field to an image.
 
-    correction: (3, 3) float32 array where correction[ch] = [a, b, c]
-    defines correction_ch(u,v) = a + b*u + c*v for each LAB channel.
+    correction: (3, 4) float32 array where correction[ch] = [a, b, c, d]
+    defines correction_ch(u,v) = a + b*u + c*v + d*u*v for each LAB channel.
     u ∈ [0,1] horizontal, v ∈ [0,1] vertical.
 
     Output format is determined by output_path extension (.png or .jpg).
@@ -741,8 +761,8 @@ def pass2_apply_correction(image_path, output_path, correction, strength, qualit
     uu, vv = np.meshgrid(u, v)
 
     for ch in range(3):
-        a, b, c = correction[ch]
-        field = (a + b * uu + c * vv) * strength
+        a, b, c, d = correction[ch]
+        field = (a + b * uu + c * vv + d * uu * vv) * strength
         lab[:, :, ch] += field
 
     # Post-processing: only on final JPEG output
@@ -1037,24 +1057,30 @@ def main():
                 stats_j = sample_border_stats(path_j, 'vertical', 'top', mask_j)
 
             if stats_i is not None and stats_j is not None:
+                means_i, weights_i = stats_i
+                means_j, weights_j = stats_j
                 if edge_type == 'horizontal':
                     for k in range(n_seg):
                         v = H_POS[k]
-                        gap = stats_j[k] - stats_i[k]
+                        gap = means_j[k] - means_i[k]
+                        # Bilinear: tile i at u=1, tile j at u=0
                         coeffs = [
-                            (i, 1.0, 1.0, v),
-                            (j, -1.0, 0.0, -v),
+                            (i, 1.0, 1.0, v, v),
+                            (j, -1.0, 0.0, -v, 0.0),
                         ]
-                        border_equations.append((coeffs, gap))
+                        w = min(weights_i[k], weights_j[k])
+                        border_equations.append((coeffs, gap, w))
                 else:
                     for k in range(n_seg):
                         u = H_POS[k]
-                        gap = stats_j[k] - stats_i[k]
+                        gap = means_j[k] - means_i[k]
+                        # Bilinear: tile i at v=1, tile j at v=0
                         coeffs = [
-                            (i, 1.0, u, 1.0),
-                            (j, -1.0, -u, 0.0),
+                            (i, 1.0, u, 1.0, u),
+                            (j, -1.0, -u, 0.0, 0.0),
                         ]
-                        border_equations.append((coeffs, gap))
+                        w = min(weights_i[k], weights_j[k])
+                        border_equations.append((coeffs, gap, w))
             else:
                 skipped += 1
 
@@ -1070,7 +1096,7 @@ def main():
             def center_correction(idx):
                 return np.array([
                     corrections[idx, ch, 0] + corrections[idx, ch, 1] * 0.5 +
-                    corrections[idx, ch, 2] * 0.5
+                    corrections[idx, ch, 2] * 0.5 + corrections[idx, ch, 3] * 0.25
                     for ch in range(3)
                 ], dtype=np.float32)
 
@@ -1102,7 +1128,7 @@ def main():
         # Report statistics
         center_corrs = np.array([
             [corrections[i, ch, 0] + corrections[i, ch, 1] * 0.5 +
-             corrections[i, ch, 2] * 0.5
+             corrections[i, ch, 2] * 0.5 + corrections[i, ch, 3] * 0.25
              for ch in range(3)]
             for i in range(len(current_paths))
         ])
