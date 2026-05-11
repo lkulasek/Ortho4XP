@@ -101,6 +101,19 @@ PASS2_ITERATIONS = 1
 SATURATION_BOOST = 1.1
 CONTRAST_BOOST = 1.1
 
+# Blue cast removal for neutral/earthy tones (dirt, ground, concrete).
+# Atmospheric haze shifts these toward blue (negative LAB b channel).
+# This corrects pixels with low chroma that have a blue bias.
+# 0.0 = disabled, 1.0 = full correction to neutral. Recommended: 0.5-0.8
+BLUE_CAST_REMOVAL = 0.6
+# Maximum chroma (sqrt(a^2 + b^2)) to consider a pixel as "neutral/earthy".
+# Higher = more aggressive (affects more saturated pixels too).
+BLUE_CAST_CHROMA_LIMIT = 25.0
+# Only correct pixels with negative b (blue). Positive b (yellow) is left alone.
+# Lightness range to target (avoid touching very dark shadows or bright highlights)
+BLUE_CAST_L_MIN = 15.0
+BLUE_CAST_L_MAX = 85.0
+
 
 # ============================================================
 # LAB conversion utilities
@@ -731,6 +744,25 @@ def pass2_apply_correction(image_path, output_path, correction, strength, qualit
         if SATURATION_BOOST != 1.0:
             lab[:, :, 1] *= SATURATION_BOOST
             lab[:, :, 2] *= SATURATION_BOOST
+
+        # Blue cast removal: nudge blue-biased neutral pixels toward neutral
+        if BLUE_CAST_REMOVAL > 0.0:
+            L_ch = lab[:, :, 0]
+            a_ch = lab[:, :, 1]
+            b_ch = lab[:, :, 2]
+            chroma = np.sqrt(a_ch ** 2 + b_ch ** 2)
+            # Target: low-chroma pixels with negative b (blue) in mid-lightness
+            mask = ((b_ch < 0)
+                    & (chroma < BLUE_CAST_CHROMA_LIMIT)
+                    & (L_ch > BLUE_CAST_L_MIN)
+                    & (L_ch < BLUE_CAST_L_MAX))
+            # Correction strength ramps down as chroma approaches the limit
+            # so the effect fades smoothly rather than creating hard edges
+            blend = np.where(mask,
+                             BLUE_CAST_REMOVAL * (1.0 - chroma / BLUE_CAST_CHROMA_LIMIT),
+                             0.0).astype(np.float32)
+            # Nudge b channel toward 0 (neutral)
+            lab[:, :, 2] = b_ch * (1.0 - blend)
 
     # Clamp L
     lab[:, :, 0] = np.clip(lab[:, :, 0], 0, 100)
