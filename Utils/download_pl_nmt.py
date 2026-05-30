@@ -257,6 +257,23 @@ def merge_to_geotiff(asc_files, output_file, lat, lon, target_resolution=None):
 
     print("  Merging {} files...".format(len(asc_files)))
 
+    # Validate files - skip any that GDAL cannot open
+    valid_files = []
+    for f in asc_files:
+        ds = gdal.Open(f)
+        if ds is not None:
+            valid_files.append(f)
+            ds = None
+        else:
+            print("  Skipping unreadable file: {}".format(os.path.basename(f)))
+    asc_files = valid_files
+
+    if not asc_files:
+        print("ERROR: No valid files to merge.")
+        return False
+
+    print("  {} valid files to merge".format(len(asc_files)))
+
     # Warp to EPSG:4326, clipping to the 1x1 degree tile
     # Target resolution: ~1 arc-second = ~30m for good quality
     if target_resolution is None:
