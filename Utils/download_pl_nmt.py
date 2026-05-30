@@ -260,11 +260,12 @@ def merge_to_geotiff(asc_files, output_file, lat, lon, target_resolution=None):
     # Validate files - skip any that GDAL cannot open
     valid_files = []
     for f in asc_files:
-        ds = gdal.Open(f)
-        if ds is not None:
-            valid_files.append(f)
-            ds = None
-        else:
+        try:
+            ds = gdal.Open(f)
+            if ds is not None:
+                valid_files.append(f)
+                ds = None
+        except RuntimeError:
             print("  Skipping unreadable file: {}".format(os.path.basename(f)))
     asc_files = valid_files
 
