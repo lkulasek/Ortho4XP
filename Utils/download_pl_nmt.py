@@ -31,6 +31,7 @@ import tempfile
 import shutil
 import threading
 import ssl
+import zipfile
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -183,6 +184,22 @@ def download_file(url, dest_path, retries=3):
     return False
 
 
+def _extract_asc(zip_path, dest_dir):
+    """Extract the first .asc file from a ZIP archive. Returns path or None."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            asc_names = [n for n in zf.namelist() if n.lower().endswith(".asc")]
+            if not asc_names:
+                return None
+            out_path = os.path.join(dest_dir, os.path.basename(asc_names[0]))
+            with zf.open(asc_names[0]) as src, open(out_path, "wb") as dst:
+                dst.write(src.read())
+            return out_path
+    except Exception as e:
+        print("  ZIP extract failed {}: {}".format(zip_path, e))
+        return None
+
+
 def download_sheets(sheets, tmp_dir, max_workers=8):
     """Download all sheet files in parallel, return list of local paths."""
     local_files = []
@@ -195,7 +212,14 @@ def download_sheets(sheets, tmp_dir, max_workers=8):
         fname = os.path.basename(sheet["url"])
         local_path = os.path.join(tmp_dir, fname)
         ok = download_file(sheet["url"], local_path)
-        return local_path if ok else None
+        if not ok:
+            return None
+        # GUGiK sometimes serves ZIP archives despite .asc extension
+        if zipfile.is_zipfile(local_path):
+            extracted = _extract_asc(local_path, tmp_dir)
+            os.remove(local_path)
+            return extracted  # None if extraction failed
+        return local_path
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
