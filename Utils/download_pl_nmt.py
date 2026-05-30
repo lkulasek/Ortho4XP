@@ -161,22 +161,18 @@ def _get_session():
 
 def download_file(url, dest_path, retries=3):
     """Download a single file with retries."""
-    if _HAS_REQUESTS:
-        session = _get_session()
-        try:
-            resp = session.get(url, timeout=60)
-            resp.raise_for_status()
-            with open(dest_path, "wb") as f:
-                f.write(resp.content)
-            return True
-        except Exception as e:
-            print("  FAILED: {} -> {}".format(url, e))
-            return False
     for attempt in range(retries):
         try:
-            resp = urllib.request.urlopen(url, timeout=60, context=_ssl_context)
-            with open(dest_path, "wb") as f:
-                f.write(resp.read())
+            if _HAS_REQUESTS:
+                session = _get_session()
+                resp = session.get(url, timeout=60)
+                resp.raise_for_status()
+                with open(dest_path, "wb") as f:
+                    f.write(resp.content)
+            else:
+                resp = urllib.request.urlopen(url, timeout=60, context=_ssl_context)
+                with open(dest_path, "wb") as f:
+                    f.write(resp.read())
             return True
         except Exception as e:
             if attempt < retries - 1:
