@@ -129,6 +129,8 @@ def query_wfs_sheets(lat, lon, year, min_resolution=None):
 
         for u, r, g in zip(urls, resols, godlos):
             res_m = float(r.replace(" m", "").strip())
+            if res_m <= 0:
+                continue  # skip bogus 0m resolution entries
             if min_resolution is not None and res_m > min_resolution:
                 continue
             all_sheets.append({"url": u, "resolution": res_m, "godlo": g, "year": year})
@@ -274,9 +276,13 @@ def merge_to_geotiff(asc_files, output_file, lat, lon, target_resolution=None):
         multithread=True,
     )
 
-    result = gdal.Warp(output_file, vrt_path, options=warp_options)
+    try:
+        result = gdal.Warp(output_file, vrt_path, options=warp_options)
+    except Exception as e:
+        print("ERROR: gdalwarp failed: {}".format(e))
+        return False
     if result is None:
-        print("ERROR: gdalwarp failed")
+        print("ERROR: gdalwarp failed (returned None)")
         return False
 
     result = None  # close
