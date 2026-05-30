@@ -49,6 +49,7 @@ try:
     from osgeo import gdal, osr
 
     gdal.UseExceptions()
+    gdal.SetCacheMax(2 * 1024 * 1024 * 1024)  # 2 GB GDAL block cache
 except ImportError:
     print("ERROR: GDAL Python bindings required. Install with:")
     print("  pip install GDAL")
@@ -272,8 +273,9 @@ def merge_to_geotiff(asc_files, output_file, lat, lon, target_resolution=None):
         outputType=gdal.GDT_Float32,
         srcNodata=-9999,
         dstNodata=-32768,
-        creationOptions=["COMPRESS=LZW", "TILED=YES"],
+        creationOptions=["COMPRESS=LZW", "TILED=YES", "BIGTIFF=YES"],
         multithread=True,
+        warpMemoryLimit=2048,
     )
 
     try:
@@ -283,6 +285,17 @@ def merge_to_geotiff(asc_files, output_file, lat, lon, target_resolution=None):
         return False
     if result is None:
         print("ERROR: gdalwarp failed (returned None)")
+        print("  VRT path: {}".format(vrt_path))
+        print("  Output: {}".format(output_file))
+        print("  GDAL last error: {}".format(gdal.GetLastErrorMsg()))
+        # Check VRT is readable
+        test_ds = gdal.Open(vrt_path)
+        if test_ds is None:
+            print("  VRT cannot be opened by GDAL")
+        else:
+            print("  VRT size: {}x{}".format(test_ds.RasterXSize, test_ds.RasterYSize))
+            print("  VRT projection: {}".format(test_ds.GetProjection()[:80]))
+            test_ds = None
         return False
 
     result = None  # close
