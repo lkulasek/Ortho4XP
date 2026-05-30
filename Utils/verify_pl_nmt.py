@@ -18,6 +18,8 @@ import os
 import sys
 import re
 import glob
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from osgeo import gdal
@@ -39,7 +41,19 @@ OUTLIER_THRESHOLD_M = 30.0
 
 # Print per-file histogram of differences
 SHOW_HISTOGRAM = True
+
+# Number of parallel workers
+NUM_WORKERS = 4
+
+# Lock for thread-safe printing
+_print_lock = threading.Lock()
 # ───────────────────────────────────────────────────────────────────────
+
+
+def _safe_print(*args, **kwargs):
+    """Thread-safe print."""
+    with _print_lock:
+        print(*args, **kwargs)
 
 
 def find_nmt_files(input_dir):
@@ -117,7 +131,7 @@ def get_copernicus_tile(lat, lon, target_w, target_h, target_gt):
         return arr
 
     except Exception as e:
-        print("    Copernicus download failed: {}".format(e))
+        _safe_print("    Copernicus download failed: {}".format(e))
         return None
 
 
@@ -125,16 +139,16 @@ def verify_file(filepath):
     """Compare a single NMT file against Copernicus. Returns stats dict."""
     lat, lon = parse_lat_lon_from_filename(filepath)
     if lat is None:
-        print("  SKIP: Cannot parse lat/lon from {}".format(filepath))
+        _safe_print("  SKIP: Cannot parse lat/lon from {}".format(filepath))
         return None
 
-    print("\n  Verifying {} (lat={}, lon={})".format(
+    _safe_print("\n  Verifying {} (lat={}, lon={})".format(
         os.path.basename(filepath), lat, lon
     ))
 
     ds = gdal.Open(filepath)
     if ds is None:
-        print("    ERROR: Cannot open file")
+        _safe_print("    ERROR: Cannot open file")
         return None
 
     band = ds.GetRasterBand(1)
@@ -149,10 +163,12 @@ def verify_file(filepath):
         nmt_arr[nmt_arr == nodata] = np.nan
 
     # Get Copernicus reference
-    print("    Downloading Copernicus GLO-30 reference...")
+    _safe_print("    Downloading Copernicus GLO-30 reference for {}...".format(
+        os.path.basename(filepath)
+    ))
     cop_arr = get_copernicus_tile(lat, lon, w, h, gt)
     if cop_arr is None:
-        print("    ERROR: Could not get Copernicus reference tile")
+        _safe_print("    ERROR: Could not get Copernicus reference tile")
         return None
 
     # Compute differences only where both have valid data
@@ -162,7 +178,7 @@ def verify_file(filepath):
     nmt_nodata_count = int(np.isnan(nmt_arr).sum())
 
     if valid_count == 0:
-        print("    ERROR: No overlapping valid pixels")
+        _safe_print("    ERROR: No overlapping valid pixels")
         return None
 
     diff = nmt_arr[valid_mask] - cop_arr[valid_mask]
@@ -189,42 +205,43 @@ def verify_file(filepath):
         "outlier_pct": outlier_pct,
     }
 
-    # Print results
-    print("    Size:           {}x{} ({} pixels)".format(w, h, total_pixels))
-    print("    NMT nodata:     {} ({:.1f}%)".format(
-        nmt_nodata_count, 100.0 * nmt_nodata_count / total_pixels
-    ))
-    print("    Compared:       {} pixels".format(valid_count))
-    print("    Mean diff:      {:.2f} m (NMT - Copernicus)".format(stats["mean_diff"]))
-    print("    Median diff:    {:.2f} m".format(stats["median_diff"]))
-    print("    Std dev:        {:.2f} m".format(stats["std_diff"]))
-    print("    Range:          {:.2f} to {:.2f} m".format(stats["min_diff"], stats["max_diff"]))
-    print("    Outliers:       {} ({:.2f}%) [threshold: {} m]".format(
-        outlier_count, outlier_pct, OUTLIER_THRESHOLD_M
-    ))
+    # Print results (thread-safe block)
+    with _print_lock:
+        print("    Size:           {}x{} ({} pixels)".format(w, h, total_pixels))
+        print("    NMT nodata:     {} ({:.1f}%)".format(
+            nmt_nodata_count, 100.0 * nmt_nodata_count / total_pixels
+        ))
+        print("    Compared:       {} pixels".format(valid_count))
+        print("    Mean diff:      {:.2f} m (NMT - Copernicus)".format(stats["mean_diff"]))
+        print("    Median diff:    {:.2f} m".format(stats["median_diff"]))
+        print("    Std dev:        {:.2f} m".format(stats["std_diff"]))
+        print("    Range:          {:.2f} to {:.2f} m".format(stats["min_diff"], stats["max_diff"]))
+        print("    Outliers:       {} ({:.2f}%) [threshold: {} m]".format(
+            outlier_count, outlier_pct, OUTLIER_THRESHOLD_M
+        ))
 
-    if SHOW_HISTOGRAM:
-        # Simple text histogram of differences
-        bins = [-np.inf, -100, -50, -30, -20, -10, -5, -2, 0, 2, 5, 10, 20, 30, 50, 100, np.inf]
-        counts, edges = np.histogram(diff, bins=bins)
-        print("    Difference distribution (NMT - Copernicus):")
-        max_bar = max(counts) if max(counts) > 0 else 1
-        for i in range(len(counts)):
-            bar_len = int(40 * counts[i] / max_bar)
-            bar = "#" * bar_len
-            pct = 100.0 * counts[i] / valid_count
-            label_lo = "<" if edges[i] == -np.inf else "{:>5.0f}".format(edges[i])
-            label_hi = ">" if edges[i + 1] == np.inf else "{:>5.0f}".format(edges[i + 1])
-            print("      {} to {} m: {:>8} ({:>5.1f}%) {}".format(
-                label_lo, label_hi, counts[i], pct, bar
-            ))
+        if SHOW_HISTOGRAM:
+            # Simple text histogram of differences
+            bins = [-np.inf, -100, -50, -30, -20, -10, -5, -2, 0, 2, 5, 10, 20, 30, 50, 100, np.inf]
+            counts, edges = np.histogram(diff, bins=bins)
+            print("    Difference distribution (NMT - Copernicus):")
+            max_bar = max(counts) if max(counts) > 0 else 1
+            for i in range(len(counts)):
+                bar_len = int(40 * counts[i] / max_bar)
+                bar = "#" * bar_len
+                pct = 100.0 * counts[i] / valid_count
+                label_lo = "<" if edges[i] == -np.inf else "{:>5.0f}".format(edges[i])
+                label_hi = ">" if edges[i + 1] == np.inf else "{:>5.0f}".format(edges[i + 1])
+                print("      {} to {} m: {:>8} ({:>5.1f}%) {}".format(
+                    label_lo, label_hi, counts[i], pct, bar
+                ))
 
-    if outlier_pct > 5.0:
-        print("    WARNING: High outlier rate!")
-    elif outlier_pct > 1.0:
-        print("    NOTE: Moderate outlier rate")
-    else:
-        print("    OK: Low outlier rate")
+        if outlier_pct > 5.0:
+            print("    WARNING: High outlier rate!")
+        elif outlier_pct > 1.0:
+            print("    NOTE: Moderate outlier rate")
+        else:
+            print("    OK: Low outlier rate")
 
     return stats
 
@@ -236,6 +253,7 @@ def main():
 
     print("Verifying PL NMT files in: {}".format(input_dir))
     print("Outlier threshold: {} m".format(OUTLIER_THRESHOLD_M))
+    print("Workers: {}".format(NUM_WORKERS))
     print("NOTE: NMT is DTM (bare earth), Copernicus is DSM (includes trees/buildings).")
     print("      Expect systematic negative bias (NMT lower than Copernicus) in forested areas.")
 
@@ -247,10 +265,15 @@ def main():
     print("Found {} files to verify".format(len(files)))
 
     all_stats = []
-    for f in files:
-        s = verify_file(f)
-        if s is not None:
-            all_stats.append(s)
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        futures = {executor.submit(verify_file, f): f for f in files}
+        for future in as_completed(futures):
+            try:
+                s = future.result()
+                if s is not None:
+                    all_stats.append(s)
+            except Exception as e:
+                _safe_print("  ERROR processing {}: {}".format(futures[future], e))
 
     # Overall summary
     if all_stats:

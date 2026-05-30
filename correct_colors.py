@@ -41,11 +41,29 @@ from collections import defaultdict
 # ============================================================
 # CONFIGURATION - edit these before running
 # ============================================================
-INPUT_DIR = "Orthophotos/+50+010/+54+018"
-OUTPUT_DIR = "Orthophotos/+50+010/+54+018_corrected"
+TILE = "+54+016"
+
+def _tile_parent(tile_str):
+    """Compute parent 10x10 degree grid dir from a tile like '+54+018' -> '+50+010'."""
+    import re
+    m = re.match(r'([+-]\d+)([+-]\d+)', tile_str)
+    if not m:
+        raise ValueError(f"Cannot parse tile: {tile_str}")
+    lat = int(m.group(1))
+    lon = int(m.group(2))
+    def _floor10(v):
+        return (v // 10) * 10 if v >= 0 else -(-v // 10) * 10 - (10 if (-v) % 10 else 0)
+    plat = _floor10(lat)
+    plon = _floor10(lon)
+    return f"{plat:+03d}{plon:+04d}"
+
+_PARENT = _tile_parent(TILE)
+
+INPUT_DIR = f"Orthophotos/{_PARENT}/{TILE}"
+OUTPUT_DIR = f"Orthophotos/{_PARENT}/{TILE}_corrected"
 # Mask directory — land/water masks (white=land, black=water).
 # Set to "" to disable mask usage.
-MASK_DIR = "Masks/+50+010/+54+018"
+MASK_DIR = f"Masks/{_PARENT}/{TILE}"
 # Minimum mask value to consider a pixel as land (0-255).
 # Pixels below this in the mask are treated as water and excluded.
 LAND_THRESHOLD = 128
