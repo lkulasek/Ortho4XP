@@ -237,18 +237,25 @@ def merge_to_geotiff(asc_files, output_file, lat, lon, target_resolution=None):
     tmp_dir = os.path.dirname(asc_files[0])
     vrt_path = os.path.join(tmp_dir, "merged.vrt")
 
+    # Write .prj sidecar files so GDAL knows the CRS when building the VRT.
+    # Without this, GDAL treats EPSG:2180 meter coordinates as pixel offsets,
+    # producing a multi-million pixel VRT that cannot be warped.
+    srs_2180 = osr.SpatialReference()
+    srs_2180.ImportFromEPSG(2180)
+    prj_wkt = srs_2180.ExportToWkt()
+    for asc in asc_files:
+        prj_path = os.path.splitext(asc)[0] + ".prj"
+        if not os.path.exists(prj_path):
+            with open(prj_path, "w") as f:
+                f.write(prj_wkt)
+
     # Create VRT - all ASC files are in EPSG:2180
     vrt_options = gdal.BuildVRTOptions(resampleAlg="bilinear")
     vrt_ds = gdal.BuildVRT(vrt_path, asc_files, options=vrt_options)
     if vrt_ds is None:
         print("ERROR: Failed to build VRT")
         return False
-
-    # Set the source CRS to EPSG:2180 (PL-1992) for files that lack it
-    srs_2180 = osr.SpatialReference()
-    srs_2180.ImportFromEPSG(2180)
-    vrt_ds.SetProjection(srs_2180.ExportToWkt())
-    vrt_ds = None  # close
+    vrt_ds = None  # close (projection is now set via .prj sidecar files)
 
     # Warp to EPSG:4326, clipping to the 1x1 degree tile
     # Target resolution: ~1 arc-second = ~30m for good quality
