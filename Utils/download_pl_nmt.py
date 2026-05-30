@@ -46,7 +46,7 @@ except ImportError:
     _HAS_REQUESTS = False
 
 try:
-    from osgeo import gdal, osr
+    from osgeo import gdal
 
     gdal.UseExceptions()
     gdal.SetCacheMax(2 * 1024 * 1024 * 1024)  # 2 GB GDAL block cache
@@ -233,30 +233,6 @@ def merge_to_geotiff(asc_files, output_file, lat, lon, target_resolution=None):
 
     print("  Merging {} files...".format(len(asc_files)))
 
-    # Build VRT from all ASC files (they're in EPSG:2180 / PL-1992)
-    tmp_dir = os.path.dirname(asc_files[0])
-    vrt_path = os.path.join(tmp_dir, "merged.vrt")
-
-    # Write .prj sidecar files so GDAL knows the CRS when building the VRT.
-    # Without this, GDAL treats EPSG:2180 meter coordinates as pixel offsets,
-    # producing a multi-million pixel VRT that cannot be warped.
-    srs_2180 = osr.SpatialReference()
-    srs_2180.ImportFromEPSG(2180)
-    prj_wkt = srs_2180.ExportToWkt()
-    for asc in asc_files:
-        prj_path = os.path.splitext(asc)[0] + ".prj"
-        if not os.path.exists(prj_path):
-            with open(prj_path, "w") as f:
-                f.write(prj_wkt)
-
-    # Create VRT - all ASC files are in EPSG:2180
-    vrt_options = gdal.BuildVRTOptions(resampleAlg="bilinear")
-    vrt_ds = gdal.BuildVRT(vrt_path, asc_files, options=vrt_options)
-    if vrt_ds is None:
-        print("ERROR: Failed to build VRT")
-        return False
-    vrt_ds = None  # close (projection is now set via .prj sidecar files)
-
     # Warp to EPSG:4326, clipping to the 1x1 degree tile
     # Target resolution: ~1 arc-second = ~30m for good quality
     if target_resolution is None:
@@ -267,6 +243,7 @@ def merge_to_geotiff(asc_files, output_file, lat, lon, target_resolution=None):
     ))
 
     warp_options = gdal.WarpOptions(
+        srcSRS="EPSG:2180",
         dstSRS="EPSG:4326",
         outputBounds=(lon, lat, lon + 1, lat + 1),
         xRes=target_resolution,
@@ -282,23 +259,15 @@ def merge_to_geotiff(asc_files, output_file, lat, lon, target_resolution=None):
     )
 
     try:
-        result = gdal.Warp(output_file, vrt_path, options=warp_options)
+        result = gdal.Warp(output_file, asc_files, options=warp_options)
     except Exception as e:
         print("ERROR: gdalwarp failed: {}".format(e))
         return False
     if result is None:
         print("ERROR: gdalwarp failed (returned None)")
-        print("  VRT path: {}".format(vrt_path))
         print("  Output: {}".format(output_file))
+        print("  Input files: {}".format(len(asc_files)))
         print("  GDAL last error: {}".format(gdal.GetLastErrorMsg()))
-        # Check VRT is readable
-        test_ds = gdal.Open(vrt_path)
-        if test_ds is None:
-            print("  VRT cannot be opened by GDAL")
-        else:
-            print("  VRT size: {}x{}".format(test_ds.RasterXSize, test_ds.RasterYSize))
-            print("  VRT projection: {}".format(test_ds.GetProjection()[:80]))
-            test_ds = None
         return False
 
     result = None  # close
