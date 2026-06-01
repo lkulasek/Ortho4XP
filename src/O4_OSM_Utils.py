@@ -18,6 +18,22 @@ overpass_servers = {
 overpass_server_choice = "random"
 max_osm_tentatives = 8
 
+_available_servers = None  # initialized lazily and persists across calls
+
+
+def _get_available_servers():
+    global _available_servers
+    if _available_servers is None:
+        _available_servers = list(overpass_servers.keys())
+        random.shuffle(_available_servers)
+    return _available_servers
+
+
+def _reset_available_servers():
+    global _available_servers
+    _available_servers = list(overpass_servers.keys())
+    random.shuffle(_available_servers)
+
 ################################################################################
 class OSM_layer:
     def __init__(self):
@@ -513,8 +529,7 @@ def OSM_query_to_OSM_layer(
 def get_overpass_data(query, bbox, server_code=None):
     tentative = 1
     headers = {"User-Agent": "Ortho4XP/1.0"}
-    available_servers = list(overpass_servers.keys())
-    random.shuffle(available_servers)
+    available_servers = _get_available_servers()
     server_index = 0
     while True:
         true_server_code = server_code
@@ -580,7 +595,7 @@ def get_overpass_data(query, bbox, server_code=None):
                 )
                 # On rate-limit, remove this server and try a different one
                 if not server_code and len(available_servers) > 1:
-                    available_servers = [
+                    available_servers[:] = [
                         s for s in available_servers if s != true_server_code
                     ]
                     server_index = 0
@@ -591,6 +606,9 @@ def get_overpass_data(query, bbox, server_code=None):
                         "from rotation, remaining:",
                         available_servers,
                     )
+                    if not available_servers:
+                        _reset_available_servers()
+                        available_servers = _get_available_servers()
                 else:
                     server_index += 1
                 time.sleep(retry_after)
