@@ -43,6 +43,9 @@ _ssl_context = ssl._create_unverified_context()
 try:
     import requests as req_lib
     _HAS_REQUESTS = True
+    # Suppress InsecureRequestWarning when verify=False (GUGiK has cert issues)
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 except ImportError:
     _HAS_REQUESTS = False
 
@@ -150,9 +153,9 @@ def _get_session():
     """Get a per-thread requests.Session for connection reuse."""
     if not hasattr(_thread_local, "session"):
         s = req_lib.Session()
+        s.verify = False  # GUGiK has SSL certificate issues
         adapter = req_lib.adapters.HTTPAdapter(
             pool_connections=10, pool_maxsize=10,
-            max_retries=req_lib.adapters.Retry(total=3, backoff_factor=1),
         )
         s.mount("https://", adapter)
         s.mount("http://", adapter)
@@ -160,24 +163,37 @@ def _get_session():
     return _thread_local.session
 
 
-def download_file(url, dest_path, retries=3):
-    """Download a single file with retries."""
+def download_file(url, dest_path, retries=4, timeout=300):
+    """Download a single file with retries.
+
+    Uses a longer timeout (default 300s) to handle large NMT files
+    from GUGiK's sometimes slow servers.
+    """
     for attempt in range(retries):
         try:
             if _HAS_REQUESTS:
                 session = _get_session()
-                resp = session.get(url, timeout=60)
+                resp = session.get(url, timeout=timeout, stream=True)
                 resp.raise_for_status()
                 with open(dest_path, "wb") as f:
-                    f.write(resp.content)
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        f.write(chunk)
             else:
-                resp = urllib.request.urlopen(url, timeout=60, context=_ssl_context)
+                resp = urllib.request.urlopen(url, timeout=timeout, context=_ssl_context)
                 with open(dest_path, "wb") as f:
-                    f.write(resp.read())
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
             return True
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                wait = 2 ** (attempt + 1)
+                print("  Retry {}/{} for {} (wait {}s): {}".format(
+                    attempt + 1, retries - 1, os.path.basename(dest_path), wait, e
+                ))
+                time.sleep(wait)
             else:
                 print("  FAILED: {} -> {}".format(url, e))
                 return False
