@@ -163,34 +163,84 @@ def _get_session():
     return _thread_local.session
 
 
-def download_file(url, dest_path, retries=4, timeout=180):
+def download_file(url, dest_path, retries=4, timeout=180, show_progress=False):
     """Download a single file with retries.
 
     Uses a 180s timeout to handle large NMT files from GUGiK's
-    sometimes slow servers.
+    sometimes slow servers. If show_progress is True, displays a
+    per-file progress bar (uses streaming with chunked reads).
     """
     for attempt in range(retries):
         try:
             if _HAS_REQUESTS:
                 session = _get_session()
-                resp = session.get(url, timeout=timeout)
-                resp.raise_for_status()
-                with open(dest_path, "wb") as f:
-                    f.write(resp.content)
+                if show_progress:
+                    resp = session.get(url, timeout=(30, 180), stream=True)
+                    try:
+                        resp.raise_for_status()
+                        total_size = int(resp.headers.get("content-length", 0))
+                        downloaded = 0
+                        mb_total = total_size / (1024 * 1024)
+                        with open(dest_path, "wb") as f:
+                            for chunk in resp.iter_content(chunk_size=256 * 1024):
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    pct = downloaded * 100 // total_size
+                                    mb_done = downloaded / (1024 * 1024)
+                                    print("    [{:3d}%] {:.1f}/{:.1f} MB".format(
+                                        pct, mb_done, mb_total
+                                    ), end="\r")
+                        if total_size > 0:
+                            print("    [100%] {:.1f}/{:.1f} MB".format(
+                                mb_total, mb_total
+                            ))
+                    finally:
+                        resp.close()
+                else:
+                    resp = session.get(url, timeout=timeout)
+                    resp.raise_for_status()
+                    with open(dest_path, "wb") as f:
+                        f.write(resp.content)
             else:
                 resp = urllib.request.urlopen(url, timeout=timeout, context=_ssl_context)
-                with open(dest_path, "wb") as f:
-                    f.write(resp.read())
+                if show_progress:
+                    total_size = int(resp.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    mb_total = total_size / (1024 * 1024)
+                    with open(dest_path, "wb") as f:
+                        while True:
+                            chunk = resp.read(256 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                pct = downloaded * 100 // total_size
+                                mb_done = downloaded / (1024 * 1024)
+                                print("    [{:3d}%] {:.1f}/{:.1f} MB".format(
+                                    pct, mb_done, mb_total
+                                ), end="\r")
+                    if total_size > 0:
+                        print("    [100%] {:.1f}/{:.1f} MB".format(
+                            mb_total, mb_total
+                        ))
+                else:
+                    with open(dest_path, "wb") as f:
+                        f.write(resp.read())
             return True
         except Exception as e:
+            # Clean up partial file on failure
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
             if attempt < retries - 1:
                 wait = 2 ** (attempt + 1)
-                print("  Retry {}/{} for {} (wait {}s): {}".format(
-                    attempt + 1, retries - 1, os.path.basename(dest_path), wait, e
+                print("    Retry {}/{} (wait {}s): {}".format(
+                    attempt + 1, retries - 1, wait, e
                 ))
                 time.sleep(wait)
             else:
-                print("  FAILED: {} -> {}".format(url, e))
+                print("  FAILED: {} -> {}".format(os.path.basename(dest_path), e))
                 return False
     return False
 
@@ -212,11 +262,40 @@ def _extract_asc(zip_path, dest_dir):
 
 
 def download_sheets(sheets, tmp_dir, max_workers=8):
-    """Download all sheet files in parallel, return list of local paths."""
+    """Download all sheet files in parallel, return list of local paths.
+
+    When there are few files (<=8), downloads sequentially with per-file
+    progress bars. Otherwise uses parallel downloads with overall ETA.
+    """
     local_files = []
     total = len(sheets)
-    done = 0
     failed = 0
+
+    # For small number of files, download sequentially with per-file progress
+    if total <= 8:
+        for i, sheet in enumerate(sheets):
+            fname = os.path.basename(sheet["url"])
+            local_path = os.path.join(tmp_dir, fname)
+            print("  [{}/{}] {}".format(i + 1, total, fname))
+            ok = download_file(sheet["url"], local_path, show_progress=True)
+            if not ok:
+                failed += 1
+                continue
+            if zipfile.is_zipfile(local_path):
+                extracted = _extract_asc(local_path, tmp_dir)
+                os.remove(local_path)
+                if extracted:
+                    local_files.append(extracted)
+                else:
+                    failed += 1
+            else:
+                local_files.append(local_path)
+        if failed:
+            print("  {} of {} downloads failed".format(failed, total))
+        return local_files
+
+    # For many files, use parallel downloads with overall ETA
+    done = 0
     start_time = time.time()
 
     def _download(sheet, idx):
@@ -225,11 +304,10 @@ def download_sheets(sheets, tmp_dir, max_workers=8):
         ok = download_file(sheet["url"], local_path)
         if not ok:
             return None
-        # GUGiK sometimes serves ZIP archives despite .asc extension
         if zipfile.is_zipfile(local_path):
             extracted = _extract_asc(local_path, tmp_dir)
             os.remove(local_path)
-            return extracted  # None if extraction failed
+            return extracted
         return local_path
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
