@@ -1115,8 +1115,8 @@ def main():
     tile_parser.add_argument(
         "--workers",
         type=int,
-        default=32,
-        help="Parallel download threads (default: 32)",
+        default=4,
+        help="Parallel download threads (default: 4)",
     )
     tile_parser.add_argument(
         "--force",
