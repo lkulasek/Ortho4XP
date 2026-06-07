@@ -341,7 +341,7 @@ def _fill_gaps_from_copernicus(output_file, lat, lon):
         ds = None
         return
 
-    print("  Filling {} nodata pixels from Copernicus GLO-30...".format(nodata_count))
+    print("  WARNING: {} nodata pixels detected — filling from Copernicus GLO-30 (~30m resolution)...".format(nodata_count))
 
     ns = "N" if lat >= 0 else "S"
     ew = "E" if lon >= 0 else "W"
@@ -398,9 +398,12 @@ def _fill_gaps_from_copernicus(output_file, lat, lon):
         ds = None
 
         remaining = nodata_count - filled_count
-        print("  Filled {} pixels from Copernicus ({} remain as nodata — sea/outside)".format(
-            filled_count, remaining
-        ))
+        if filled_count > 0:
+            print("  WARNING: Filled {} pixels using Copernicus GLO-30 (lower precision ~30m source)".format(
+                filled_count
+            ))
+        if remaining > 0:
+            print("  {} pixels remain as nodata (sea/outside coverage)".format(remaining))
 
     except Exception as e:
         print("  WARNING: Copernicus gap-fill failed: {}".format(e))
@@ -548,43 +551,550 @@ def _get_reference_land_mask(lat, lon, target_w, target_h):
         return None
 
 
+def query_wfs_sheets_bbox(lat_south, lon_west, lat_north, lon_east, year, min_resolution=None):
+    """Query GUGiK WFS for all NMT sheets covering an arbitrary bounding box.
+
+    Unlike query_wfs_sheets() which takes a 1x1 degree tile, this accepts
+    any bounding box defined by corner coordinates.
+    """
+    layer = "gugik:SkorowidzNMT{}".format(year)
+    bbox = "{},{},{},{},EPSG:4326".format(lat_south, lon_west, lat_north, lon_east)
+
+    all_sheets = []
+    start = 0
+    page_size = 200
+
+    while True:
+        url = (
+            "{}?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
+            "&TYPENAMES={}&BBOX={}&COUNT={}&STARTINDEX={}"
+        ).format(WFS_BASE, layer, bbox, page_size, start)
+
+        try:
+            resp = urllib.request.urlopen(url, timeout=60, context=_ssl_context)
+            data = resp.read().decode(errors="replace")
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+            print("  WFS query failed for year {}: {}".format(year, e))
+            break
+
+        urls = re.findall(
+            r"<gugik:url_do_pobrania>(.*?)</gugik:url_do_pobrania>", data
+        )
+        resols = re.findall(
+            r"<gugik:char_przestrz>(.*?)</gugik:char_przestrz>", data
+        )
+        godlos = re.findall(
+            r"<gugik:godlo>(.*?)</gugik:godlo>", data
+        )
+
+        if not urls:
+            break
+
+        for u, r, g in zip(urls, resols, godlos):
+            res_m = float(r.replace(" m", "").strip())
+            if res_m <= 0:
+                continue
+            if min_resolution is not None and res_m > min_resolution:
+                continue
+            all_sheets.append({"url": u, "resolution": res_m, "godlo": g, "year": year})
+
+        start += page_size
+        if len(urls) < page_size:
+            break
+
+    return all_sheets
+
+
+def merge_to_geotiff_bbox(asc_files, output_file, lat_south, lon_west, lat_north, lon_east,
+                          target_resolution=None):
+    """Merge ASC files into a GeoTIFF clipped to an arbitrary bounding box.
+
+    Similar to merge_to_geotiff() but uses explicit bounds instead of 1x1 degree tile.
+    Fills any remaining nodata gaps from Copernicus GLO-30 DEM.
+    """
+    if not asc_files:
+        print("ERROR: No files to merge.")
+        return False
+
+    print("  Merging {} files...".format(len(asc_files)))
+
+    # Validate files
+    valid_files = []
+    for f in asc_files:
+        try:
+            ds = gdal.Open(f)
+            if ds is not None:
+                valid_files.append(f)
+                ds = None
+        except RuntimeError:
+            print("  Skipping unreadable file: {}".format(os.path.basename(f)))
+    asc_files = valid_files
+
+    if not asc_files:
+        print("ERROR: No valid files to merge.")
+        return False
+
+    print("  {} valid files to merge".format(len(asc_files)))
+
+    if target_resolution is None:
+        target_resolution = 1.0 / 3600  # ~1 arc-second per meter at equator
+
+    print("  Reprojecting to EPSG:4326 (resolution: {:.8f} deg)...".format(
+        target_resolution
+    ))
+
+    warp_options = gdal.WarpOptions(
+        srcSRS="EPSG:2180",
+        dstSRS="EPSG:4326",
+        outputBounds=(lon_west, lat_south, lon_east, lat_north),
+        xRes=target_resolution,
+        yRes=target_resolution,
+        resampleAlg="bilinear",
+        format="GTiff",
+        outputType=gdal.GDT_Float32,
+        srcNodata=-9999,
+        dstNodata=-32768,
+        creationOptions=["COMPRESS=LZW", "TILED=YES", "BIGTIFF=YES"],
+        multithread=True,
+        warpMemoryLimit=2048,
+    )
+
+    try:
+        result = gdal.Warp(output_file, asc_files, options=warp_options)
+    except Exception as e:
+        print("ERROR: gdalwarp failed: {}".format(e))
+        return False
+    if result is None:
+        print("ERROR: gdalwarp failed (returned None)")
+        print("  GDAL last error: {}".format(gdal.GetLastErrorMsg()))
+        return False
+
+    result = None  # close
+
+    # Fill nodata gaps with Copernicus GLO-30 DEM (using center of bbox for tile lookup)
+    center_lat = int((lat_south + lat_north) / 2.0)
+    center_lon = int((lon_west + lon_east) / 2.0)
+    _fill_gaps_from_copernicus(output_file, center_lat, center_lon)
+
+    size_mb = os.path.getsize(output_file) / (1024 * 1024)
+    print("  Output: {} ({:.1f} MB)".format(output_file, size_mb))
+    return True
+
+
+def geotiff_to_muxp_png(geotiff_path, png_path):
+    """Convert a Float32 GeoTIFF to a 16-bit grayscale PNG for MUXP.
+
+    Maps the actual elevation range [min, max] to [0, 65535].
+    The GeoTIFF should already have nodata gaps filled by Copernicus.
+    Any remaining nodata pixels are set to the minimum valid elevation.
+    Returns a dict with metadata or None on failure.
+    """
+    import numpy
+
+    ds = gdal.Open(geotiff_path)
+    if ds is None:
+        print("ERROR: Cannot open GeoTIFF for PNG conversion")
+        return None
+
+    band = ds.GetRasterBand(1)
+    nodata = band.GetNoDataValue()
+    arr = band.ReadAsArray()
+    gt = ds.GetGeoTransform()
+    w, h = ds.RasterXSize, ds.RasterYSize
+    ds = None
+
+    # Compute bounds from geotransform
+    lon_west = gt[0]
+    lat_north = gt[3]
+    lon_east = gt[0] + w * gt[1]
+    lat_south = gt[3] + h * gt[5]
+
+    # Handle nodata
+    if nodata is not None:
+        valid_mask = arr != nodata
+    else:
+        valid_mask = numpy.ones_like(arr, dtype=bool)
+
+    if not valid_mask.any():
+        print("ERROR: All pixels are nodata — no valid elevation data")
+        return None
+
+    valid_count = int(valid_mask.sum())
+    total_count = arr.size
+    nodata_count = total_count - valid_count
+    nodata_pct = 100.0 * nodata_count / total_count
+
+    if nodata_count > 0:
+        print("  WARNING: {} pixels ({:.1f}%) remain as nodata after Copernicus gap-fill".format(
+            nodata_count, nodata_pct
+        ))
+        print("           These will be set to the minimum elevation value.")
+
+    elev_min = float(arr[valid_mask].min())
+    elev_max = float(arr[valid_mask].max())
+
+    # Safety: ensure we have a non-zero range
+    if elev_max - elev_min < 0.01:
+        print("  WARNING: Elevation range is < 0.01m — flat area")
+        elev_max = elev_min + 1.0
+
+    print("  Elevation range: {:.2f}m to {:.2f}m (delta: {:.2f}m)".format(
+        elev_min, elev_max, elev_max - elev_min
+    ))
+
+    # Normalize to 0.0 - 1.0
+    normalized = (arr.astype(numpy.float64) - elev_min) / (elev_max - elev_min)
+    # Fill remaining nodata pixels with 0 (minimum elevation)
+    if nodata is not None and nodata_count > 0:
+        normalized[~valid_mask] = 0.0
+    # Clamp to [0, 1] for safety
+    normalized = numpy.clip(normalized, 0.0, 1.0)
+
+    # Scale to uint16 range [0, 65535]
+    png_arr = (normalized * 65535.0).astype(numpy.uint16)
+
+    print("  PNG dimensions: {}x{} pixels".format(w, h))
+    print("  PNG encoding: 16-bit grayscale, 0={:.2f}m (black), 65535={:.2f}m (white)".format(
+        elev_min, elev_max
+    ))
+
+    # Write 16-bit grayscale PNG using GDAL (avoids PIL dependency).
+    # PNG driver only supports CreateCopy(), so create in-memory first.
+    mem_driver = gdal.GetDriverByName("MEM")
+    mem_ds = mem_driver.Create("", w, h, 1, gdal.GDT_UInt16)
+    if mem_ds is None:
+        print("ERROR: Cannot create in-memory dataset")
+        return None
+    mem_ds.GetRasterBand(1).WriteArray(png_arr)
+
+    png_driver = gdal.GetDriverByName("PNG")
+    png_ds = png_driver.CreateCopy(png_path, mem_ds, strict=0)
+    if png_ds is None:
+        print("ERROR: Cannot create PNG file")
+        mem_ds = None
+        return None
+    png_ds = None  # flush and close
+    mem_ds = None
+
+    size_kb = os.path.getsize(png_path) / 1024
+    print("  Written: {} ({:.0f} KB)".format(png_path, size_kb))
+
+    return {
+        "elevation_min": elev_min,
+        "elevation_max": elev_max,
+        "width": w,
+        "height": h,
+        "lon_west": lon_west,
+        "lon_east": lon_east,
+        "lat_south": lat_south,
+        "lat_north": lat_north,
+    }
+
+
+def write_muxp_snippet(info, png_filename, snippet_path):
+    """Write a MUXP YAML configuration snippet alongside the PNG."""
+    content = """# MUXP configuration snippet for high-resolution airport elevation
+# Generated by download_pl_nmt.py (MUXP mode)
+#
+# PNG file: {png}
+# Dimensions: {w}x{h} pixels
+# Source: Polish NMT (GUGiK) — 1m resolution LiDAR DEM
+#
+# Copy the raster_updates block below into your .muxp script.
+# Make sure the PNG file is in the same directory as your .muxp file.
+
+# Step 1: Subdivide the mesh for high-resolution terrain
+refine_areas:
+  - # Use a KML boundary or define inline polygon
+    # kml: "airport_boundary.kml"
+    lon_west: {lon_w:.6f}
+    lon_east: {lon_e:.6f}
+    lat_south: {lat_s:.6f}
+    lat_north: {lat_n:.6f}
+    max_edge_length: 10   # Dense 10-meter triangle grid
+
+# Step 2: Apply high-resolution elevation from NMT data
+raster_updates:
+  - png: "{png}"
+    lon_west: {lon_w:.6f}
+    lon_east: {lon_e:.6f}
+    lat_south: {lat_s:.6f}
+    lat_north: {lat_n:.6f}
+    elevation_min: {elev_min:.2f}
+    elevation_max: {elev_max:.2f}
+""".format(
+        png=png_filename,
+        w=info["width"],
+        h=info["height"],
+        lon_w=info["lon_west"],
+        lon_e=info["lon_east"],
+        lat_s=info["lat_south"],
+        lat_n=info["lat_north"],
+        elev_min=info["elevation_min"],
+        elev_max=info["elevation_max"],
+    )
+
+    with open(snippet_path, "w") as f:
+        f.write(content)
+    print("  MUXP snippet: {}".format(snippet_path))
+
+
+def muxp_main(args):
+    """MUXP mode: download high-res NMT for an airport area and create 16-bit PNG."""
+
+    center_lat = args.center_lat
+    center_lon = args.center_lon
+    half_size = args.size / 2.0
+
+    lat_south = center_lat - half_size
+    lat_north = center_lat + half_size
+    lon_west = center_lon - half_size
+    lon_east = center_lon + half_size
+
+    print("MUXP mode: Airport elevation map\n")
+    print("  Center:  {:.6f}, {:.6f}".format(center_lat, center_lon))
+    print("  Size:    {:.4f} deg".format(args.size))
+    print("  Bounds:  ({:.6f}, {:.6f}) -> ({:.6f}, {:.6f})".format(
+        lat_south, lon_west, lat_north, lon_east
+    ))
+    print("  Source resolution filter: {}m".format(args.resolution))
+
+    # Output paths (next to script)
+    png_name = "airport_elevation_map.png"
+    snippet_name = "airport_elevation_map.muxp"
+    png_path = os.path.join(SCRIPT_DIR, png_name)
+    snippet_path = os.path.join(SCRIPT_DIR, snippet_name)
+
+    if os.path.exists(png_path) and not args.force:
+        print("\nOutput already exists: {}".format(png_path))
+        print("Use --force to overwrite.")
+        return
+
+    # Query WFS for sheets covering the bbox
+    years = sorted(AVAILABLE_YEARS, reverse=True)
+    all_sheets = []
+
+    print("\n  Querying WFS for {} year(s)...".format(len(years)))
+    with ThreadPoolExecutor(max_workers=min(len(years), 8)) as executor:
+        futures = {
+            executor.submit(
+                query_wfs_sheets_bbox,
+                lat_south, lon_west, lat_north, lon_east,
+                y, args.resolution
+            ): y
+            for y in years
+        }
+        for future in as_completed(futures):
+            year = futures[future]
+            sheets = future.result()
+            if sheets:
+                print("  Found {} sheets (year {})".format(len(sheets), year))
+                all_sheets.extend(sheets)
+
+    if not all_sheets:
+        print("ERROR: No NMT data found for this area.")
+        print("Ensure the coordinates are within Poland (49-55N, 14-24E).")
+        sys.exit(1)
+
+    # Deduplicate by godlo — keep newest year
+    seen_godlo = {}
+    for s in all_sheets:
+        g = s["godlo"]
+        if g not in seen_godlo or s["year"] > seen_godlo[g]["year"]:
+            seen_godlo[g] = s
+    all_sheets = list(seen_godlo.values())
+
+    # Deduplicate by URL
+    seen = set()
+    unique_sheets = []
+    for s in all_sheets:
+        if s["url"] not in seen:
+            seen.add(s["url"])
+            unique_sheets.append(s)
+    all_sheets = unique_sheets
+
+    res_counts = {}
+    for s in all_sheets:
+        r = s["resolution"]
+        res_counts[r] = res_counts.get(r, 0) + 1
+    print("  After dedup: {} unique sheets".format(len(all_sheets)))
+    print("  Resolution breakdown: {}".format(
+        ", ".join(
+            "{:.0f}m: {}".format(r, c) for r, c in sorted(res_counts.items())
+        )
+    ))
+
+    # Download to temp directory
+    tmp_dir = tempfile.mkdtemp(prefix="pl_nmt_muxp_")
+    tmp_tif = os.path.join(tmp_dir, "merged.tif")
+    try:
+        print("\n  Downloading {} files...".format(len(all_sheets)))
+        local_files = download_sheets(all_sheets, tmp_dir, args.workers)
+
+        if not local_files:
+            print("ERROR: No files were downloaded successfully.")
+            sys.exit(1)
+
+        print("  Downloaded {}/{} files\n".format(len(local_files), len(all_sheets)))
+
+        # Compute target resolution in degrees
+        # 1m at this latitude: 1m / (111320 * cos(lat)) for longitude
+        # For simplicity use arc-seconds: 1m ~ 1/111320 degrees latitude
+        import math
+        lat_deg_per_m = 1.0 / 111320.0
+        lon_deg_per_m = 1.0 / (111320.0 * math.cos(math.radians(center_lat)))
+        # Use the average of lat/lon resolution (they differ slightly)
+        target_res_deg = (lat_deg_per_m + lon_deg_per_m) / 2.0 * args.resolution
+
+        print("  Target pixel size: {:.8f} deg (~{:.1f}m)".format(
+            target_res_deg, args.resolution
+        ))
+
+        # Merge to intermediate GeoTIFF
+        if not merge_to_geotiff_bbox(
+            local_files, tmp_tif,
+            lat_south, lon_west, lat_north, lon_east,
+            target_res_deg
+        ):
+            sys.exit(1)
+
+        # Convert to 16-bit PNG
+        print("\n  Converting to 16-bit grayscale PNG...")
+        info = geotiff_to_muxp_png(tmp_tif, png_path)
+        if info is None:
+            sys.exit(1)
+
+        # Write MUXP snippet
+        print("")
+        write_muxp_snippet(info, png_name, snippet_path)
+
+    finally:
+        print("\n  Cleaning up temp files...")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    print("\n" + "=" * 60)
+    print("MUXP airport elevation map created successfully!")
+    print("=" * 60)
+    print("\nFiles:")
+    print("  PNG:     {}".format(png_path))
+    print("  Config:  {}".format(snippet_path))
+    print("\nElevation range:")
+    print("  Min: {:.2f} m (black, pixel=0)".format(info["elevation_min"]))
+    print("  Max: {:.2f} m (white, pixel=65535)".format(info["elevation_max"]))
+    print("\nBounding box:")
+    print("  lon_west:  {:.6f}".format(info["lon_west"]))
+    print("  lon_east:  {:.6f}".format(info["lon_east"]))
+    print("  lat_south: {:.6f}".format(info["lat_south"]))
+    print("  lat_north: {:.6f}".format(info["lat_north"]))
+    print("\nCopy the raster_updates block from {} into your .muxp file.".format(
+        snippet_name
+    ))
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Download Polish NMT elevation data for Ortho4XP"
+        description="Download Polish NMT elevation data for Ortho4XP",
+        usage="%(prog)s <lat> <lon> [options]\n       %(prog)s muxp <center_lat> <center_lon> [options]",
     )
-    parser.add_argument("lat", type=int, help="Tile latitude (e.g. 51)")
-    parser.add_argument("lon", type=int, help="Tile longitude (e.g. 20)")
-    parser.add_argument(
+    subparsers = parser.add_subparsers(dest="command")
+
+    # 'tile' subcommand (also the implicit default for backward compat)
+    tile_parser = subparsers.add_parser(
+        "tile",
+        help="Download NMT for a 1x1 degree Ortho4XP tile (default mode)",
+    )
+    tile_parser.add_argument("lat", type=int, help="Tile latitude (e.g. 51)")
+    tile_parser.add_argument("lon", type=int, help="Tile longitude (e.g. 20)")
+    tile_parser.add_argument(
         "--resolution",
         type=float,
         default=None,
         help="Max source resolution in meters (default: all available, typically 5m)",
     )
-    parser.add_argument(
+    tile_parser.add_argument(
         "--year",
         type=int,
         default=None,
         help="NMT data year (default: try latest first)",
     )
-    parser.add_argument(
+    tile_parser.add_argument(
         "--target-arcsec",
         type=float,
         default=1.0 / 3,
         help='Target resolution in arc-seconds (default: 1/3" = ~10m)',
     )
-    parser.add_argument(
+    tile_parser.add_argument(
         "--workers",
         type=int,
         default=32,
         help="Parallel download threads (default: 32)",
     )
-    parser.add_argument(
+    tile_parser.add_argument(
         "--force",
         action="store_true",
         help="Overwrite existing output file",
     )
 
-    args = parser.parse_args()
+    # MUXP subcommand
+    muxp_parser = subparsers.add_parser(
+        "muxp",
+        help="Generate a 16-bit PNG airport elevation map for MUXP",
+        description=(
+            "Download high-resolution (1m) NMT elevation data for a small airport area "
+            "and produce a 16-bit grayscale PNG heightmap compatible with MUXP's "
+            "raster_updates feature."
+        ),
+    )
+    muxp_parser.add_argument(
+        "center_lat", type=float, help="Airport center latitude (e.g. 50.0775)"
+    )
+    muxp_parser.add_argument(
+        "center_lon", type=float, help="Airport center longitude (e.g. 19.7850)"
+    )
+    muxp_parser.add_argument(
+        "--size",
+        type=float,
+        default=0.02,
+        help="Square size in degrees around center (default: 0.02 = ~2.2km)",
+    )
+    muxp_parser.add_argument(
+        "--resolution",
+        type=float,
+        default=1.0,
+        help="Max source resolution in meters (default: 1m)",
+    )
+    muxp_parser.add_argument(
+        "--workers",
+        type=int,
+        default=32,
+        help="Parallel download threads (default: 32)",
+    )
+    muxp_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing output files",
+    )
+
+    # Backward compatibility: if first positional arg is not a known subcommand,
+    # treat it as the implicit 'tile' mode (e.g. "download_pl_nmt.py 51 20").
+    argv = sys.argv[1:]
+    if argv and argv[0] not in ("muxp", "tile", "-h", "--help"):
+        argv = ["tile"] + argv
+
+    args = parser.parse_args(argv)
+
+    # Route to MUXP mode
+    if args.command == "muxp":
+        muxp_main(args)
+        return
+
+    # Original tile mode
+    if args.command != "tile":
+        parser.print_help()
+        print("\nExamples:")
+        print("  python3 download_pl_nmt.py 51 20")
+        print("  python3 download_pl_nmt.py muxp 50.0775 19.785 --size 0.03")
+        sys.exit(1)
 
     out_file = output_path(args.lat, args.lon)
     if os.path.exists(out_file) and not args.force:
