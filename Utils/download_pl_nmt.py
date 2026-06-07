@@ -163,29 +163,24 @@ def _get_session():
     return _thread_local.session
 
 
-def download_file(url, dest_path, retries=4, timeout=300):
+def download_file(url, dest_path, retries=4, timeout=180):
     """Download a single file with retries.
 
-    Uses a longer timeout (default 300s) to handle large NMT files
-    from GUGiK's sometimes slow servers.
+    Uses a 180s timeout to handle large NMT files from GUGiK's
+    sometimes slow servers.
     """
     for attempt in range(retries):
         try:
             if _HAS_REQUESTS:
                 session = _get_session()
-                resp = session.get(url, timeout=timeout, stream=True)
+                resp = session.get(url, timeout=timeout)
                 resp.raise_for_status()
                 with open(dest_path, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                        f.write(chunk)
+                    f.write(resp.content)
             else:
                 resp = urllib.request.urlopen(url, timeout=timeout, context=_ssl_context)
                 with open(dest_path, "wb") as f:
-                    while True:
-                        chunk = resp.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        f.write(chunk)
+                    f.write(resp.read())
             return True
         except Exception as e:
             if attempt < retries - 1:
