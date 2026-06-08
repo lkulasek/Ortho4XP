@@ -884,7 +884,7 @@ def write_muxp_snippet(info, png_filename, snippet_path):
     """Write a MUXP-compatible configuration file alongside the PNG.
 
     Generates a valid .muxp file with required header fields and
-    uses the update_raster_elevation command supported by MUXP.
+    uses limit_edges + apply_elevation_from_png commands supported by MUXP.
     """
     from math import floor
 
@@ -896,35 +896,59 @@ def write_muxp_snippet(info, png_filename, snippet_path):
     tile = "{:+03d}{:+04d}".format(int(floor(lat_min)), int(floor(lon_min)))
     area = "{} {} {} {}".format(lat_min, lat_max, lon_min, lon_max)
     file_id = os.path.splitext(png_filename)[0]
-    elevation = round((info["elevation_min"] + info["elevation_max"]) / 2.0, 1)
+    source_dsf = "pack=Custom%Scenery/zOrtho4XP_{}".format(tile)
+    center_lat = (lat_min + lat_max) / 2.0
+    center_lon = (lon_min + lon_max) / 2.0
 
-    content = (
-        "muxp_version: 0.4\n"
-        "id: {id}\n"
-        "version: 1.0\n"
-        "description: High-resolution NMT elevation update\n"
-        "author: download_pl_nmt.py\n"
-        "tile: {tile}\n"
-        "area: {area}\n"
-        "source_dsf: DEFAULT\n"
-        "\n"
-        "update_raster_elevation:\n"
-        "   elevation: {elev}\n"
-        "   coordinates:\n"
+    coords = (
         "      - {lat_s} {lon_w}\n"
         "      - {lat_s} {lon_e}\n"
         "      - {lat_n} {lon_e}\n"
         "      - {lat_n} {lon_w}\n"
         "      - {lat_s} {lon_w}\n"
+    ).format(lat_s=lat_min, lat_n=lat_max, lon_w=lon_min, lon_e=lon_max)
+
+    content = (
+        "muxp_version: 0.4\n"
+        "id: {id}\n"
+        "version: 1.0\n"
+        "description: Apply NMT elevation from PNG\n"
+        "author: download_pl_nmt.py\n"
+        "# center: {center_lat:.8f} {center_lon:.8f}\n"
+        "tile: {tile}\n"
+        "area: {area}\n"
+        "source_dsf: {source_dsf}\n"
+        "\n"
+        "limit_edges:\n"
+        "   edge_limit: 2\n"
+        "   coordinates:\n"
+        "{coords}"
+        "\n"
+        "apply_elevation_from_png:\n"
+        "   png: {png}\n"
+        "   lon_west: {lon_w}\n"
+        "   lon_east: {lon_e}\n"
+        "   lat_south: {lat_s}\n"
+        "   lat_north: {lat_n}\n"
+        "   elevation_min: {elev_min}\n"
+        "   elevation_max: {elev_max}\n"
+        "   coordinates:\n"
+        "{coords}"
     ).format(
         id=file_id,
+        center_lat=center_lat,
+        center_lon=center_lon,
         tile=tile,
         area=area,
-        elev=elevation,
+        source_dsf=source_dsf,
+        png=png_filename,
         lat_s=lat_min,
         lat_n=lat_max,
         lon_w=lon_min,
         lon_e=lon_max,
+        elev_min=round(info["elevation_min"], 2),
+        elev_max=round(info["elevation_max"], 2),
+        coords=coords,
     )
 
     with open(snippet_path, "w") as f:
@@ -1147,8 +1171,8 @@ def main():
     muxp_parser.add_argument(
         "--size",
         type=float,
-        default=0.02,
-        help="Square size in degrees around center (default: 0.02 = ~2.2km)",
+        default=0.01,
+        help="Square size in degrees around center (default: 0.01 = ~1.1km)",
     )
     muxp_parser.add_argument(
         "--resolution",

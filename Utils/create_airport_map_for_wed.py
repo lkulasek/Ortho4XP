@@ -6,10 +6,10 @@ from PIL import Image
 import rasterio
 
 # ==================== CONFIGURATION ====================
-AIRPORT_NAME = "EP65_smolnik"
-LATITUDE = 49.282084 # Replace with your airport's latitude
-LONGITUDE = 22.117161 # Replace with your airport's longitude
-ZOOM = 18  # Zoom level (16 = medium, 17 = high, 18 = very high res)
+AIRPORT_NAME = "EPAR_bircza"
+LATITUDE =  49.658317 # Replace with your airport's latitude
+LONGITUDE = 22.514223  # Replace with your airport's longitude
+ZOOM = 17  # Zoom level (16 = medium, 17 = high, 18 = very high res)
 BOX_RADIUS = 4  # How many tiles to grab in each direction from the center
 
 

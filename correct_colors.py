@@ -41,7 +41,7 @@ from collections import defaultdict
 # ============================================================
 # CONFIGURATION - edit these before running
 # ============================================================
-TILE = "+54+016"
+TILE = "+50+022"
 
 def _tile_parent(tile_str):
     """Compute parent 10x10 degree grid dir from a tile like '+54+018' -> '+50+010'."""
@@ -76,7 +76,7 @@ INTER_STRENGTH = 0.9   # graph-based seam correction across images
 # JPEG output quality 1-100
 JPEG_QUALITY = 90
 # Number of parallel workers
-WORKERS = 4
+WORKERS = 3
 # Create backup of originals before overwriting (only used if OUTPUT_DIR == INPUT_DIR)
 BACKUP = True
 
